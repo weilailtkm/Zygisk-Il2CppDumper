@@ -46,11 +46,11 @@
             width: 100%;
             padding: 12px;
             border-radius: 8px;
+            font-size: 15px;
+            margin-bottom: 8px;
             border: 1px solid #475569;
             background: #0f172a;
             color: #e2e8f0;
-            font-size: 15px;
-            margin-bottom: 8px;
         }
         .hint { font-size: 12px; color: #64748b; margin-bottom: 14px; }
         .btn {
@@ -60,10 +60,9 @@
             border-radius: 8px;
             font-size: 15px;
             font-weight: 600;
-            cursor: pointer;
             margin-bottom: 8px;
         }
-        .btn-primary { background: #0284c7; color: white; }
+        .btn-primary { background: #0284c7; color: #fff; }
         .btn-secondary { background: #334155; color: #e2e8f0; }
         .btn:disabled { opacity: 0.5; }
         .msg {
@@ -84,13 +83,13 @@
             bottom: 24px;
             padding: 14px 16px;
             border-radius: 10px;
-            color: white;
+            color: #fff;
             font-weight: 600;
             text-align: center;
             opacity: 0;
             pointer-events: none;
             transition: opacity 0.2s;
-            z-index: 10;
+            z-index: 99;
         }
         .toast.show { opacity: 1; }
         .toast.ok { background: #16a34a; }
@@ -103,7 +102,7 @@
     <p class="sub">Zygisk 运行时 dump · 输入包名保存后冷启动游戏</p>
 
     <div class="card">
-        <div class="row"><span class="label">当前包名</span><span class="value" id="curPkg">读取中…</span></div>
+        <div class="row"><span class="label">当前包名</span><span class="value" id="curPkg">初始化…</span></div>
         <div class="row"><span class="label">输出路径</span><span class="value" id="outPath">—</span></div>
     </div>
 
@@ -117,90 +116,171 @@
 </div>
 <div class="toast" id="toast"></div>
 
-<script type="module">
-    import { exec } from 'kernelsu';
-
-    const MOD = '/data/adb/modules/zygisk_il2cppdumper';
-    const CFG = `${MOD}/target_package`;
-
-    async function run(cmd) {
-        try {
-            const r = await Promise.resolve(exec(cmd));
-            return { ok: r.errno === 0, out: (r.stdout || '').trim(), err: (r.stderr || '').trim() };
-        } catch (e) {
-            return { ok: false, out: '', err: String(e) };
-        }
-    }
+<!-- 不用 type=module / import kernelsu：部分 Manager 解析失败会导致整页脚本不执行 -->
+<script>
+(function () {
+    var MOD = '/data/adb/modules/zygisk_il2cppdumper';
+    var CFG = MOD + '/target_package';
+    var cbSeq = 0;
 
     function feedback(text, ok) {
-        const toast = document.getElementById('toast');
+        var toast = document.getElementById('toast');
         toast.textContent = text;
-        toast.className = `toast show ${ok ? 'ok' : 'err'}`;
+        toast.className = 'toast show ' + (ok ? 'ok' : 'err');
         clearTimeout(feedback._t);
-        feedback._t = setTimeout(() => toast.classList.remove('show'), 2500);
+        feedback._t = setTimeout(function () { toast.classList.remove('show'); }, 2800);
 
-        const msg = document.getElementById('msg');
+        var msg = document.getElementById('msg');
         msg.textContent = text;
-        msg.className = `msg show ${ok ? 'ok' : 'err'}`;
+        msg.className = 'msg show ' + (ok ? 'ok' : 'err');
+
+        try {
+            if (window.ksu && typeof ksu.toast === 'function') ksu.toast(text);
+        } catch (_) {}
     }
 
     function validPkg(p) {
-        return /^[A-Za-z0-9_.]+$/.test(p) && p.includes('.');
+        return /^[A-Za-z0-9_.]+$/.test(p) && p.indexOf('.') !== -1;
     }
 
-    async function loadCurrent() {
-        const r = await run(`cat "${CFG}" 2>/dev/null || true`);
-        const pkg = (r.out || '').split('\n')[0].trim();
+    function getBridge() {
+        return window.ksu || window.KSU || window.ksuNext || null;
+    }
+
+    // 兼容：async callback / sync 返回 string
+    function run(cmd) {
+        return new Promise(function (resolve) {
+            var bridge = getBridge();
+            if (!bridge || typeof bridge.exec !== 'function') {
+                resolve({ ok: false, out: '', err: '无 ksu 桥接，请用 KernelSU / KSU-Next / WebUI-X 打开本页' });
+                return;
+            }
+
+            var done = false;
+            function finish(ok, out, err) {
+                if (done) return;
+                done = true;
+                resolve({ ok: !!ok, out: (out || '').trim(), err: (err || '').trim() });
+            }
+
+            var timer = setTimeout(function () {
+                finish(false, '', '执行超时（10s）');
+            }, 10000);
+
+            var name = '_il2cpp_cb_' + (++cbSeq);
+            window[name] = function (errno, stdout, stderr) {
+                clearTimeout(timer);
+                try { delete window[name]; } catch (_) { window[name] = undefined; }
+                finish(Number(errno) === 0, stdout, stderr);
+            };
+
+            try {
+                // 常见：exec(cmd, optionsJson, callbackName)
+                var ret = bridge.exec(cmd, '{}', name);
+                if (typeof ret === 'string') {
+                    clearTimeout(timer);
+                    try { delete window[name]; } catch (_) {}
+                    finish(true, ret, '');
+                }
+                return;
+            } catch (_) {}
+
+            try {
+                // 常见：exec(cmd, callbackName)
+                var ret2 = bridge.exec(cmd, name);
+                if (typeof ret2 === 'string') {
+                    clearTimeout(timer);
+                    try { delete window[name]; } catch (_) {}
+                    finish(true, ret2, '');
+                }
+                return;
+            } catch (_) {}
+
+            try {
+                // 同步：exec(cmd) -> stdout string
+                var out = bridge.exec(cmd);
+                clearTimeout(timer);
+                try { delete window[name]; } catch (_) {}
+                finish(true, String(out == null ? '' : out), '');
+            } catch (e) {
+                clearTimeout(timer);
+                try { delete window[name]; } catch (_) {}
+                finish(false, '', String(e));
+            }
+        });
+    }
+
+    function applyPkg(pkg) {
         document.getElementById('curPkg').textContent = pkg || '未设置';
-        document.getElementById('pkgInput').value = pkg || '';
+        if (pkg) document.getElementById('pkgInput').value = pkg;
         document.getElementById('outPath').textContent = pkg
-            ? `/data/data/${pkg}/files/dump.cs`
+            ? ('/data/data/' + pkg + '/files/dump.cs')
             : '保存包名后显示';
     }
 
-    async function savePkg() {
-        const btn = document.getElementById('btnSave');
-        btn.disabled = true;
-        try {
-            const pkg = document.getElementById('pkgInput').value.trim();
-            if (!validPkg(pkg)) {
-                feedback('包名无效，例如 com.game.example', false);
+    function loadCurrent() {
+        return run('cat "' + CFG + '" 2>/dev/null || true').then(function (r) {
+            if (!r.ok && r.err && r.err.indexOf('ksu') !== -1) {
+                applyPkg('');
+                feedback(r.err, false);
                 return;
             }
-            const r = await run(`mkdir -p "${MOD}" && printf '%s\\n' "${pkg}" > "${CFG}" && cat "${CFG}"`);
-            const saved = (r.out || '').split('\n')[0].trim();
-            if (r.ok && saved === pkg) {
+            var pkg = (r.out || '').split('\n')[0].trim();
+            applyPkg(pkg);
+        });
+    }
+
+    function savePkg() {
+        feedback('正在保存…', true);
+        var btn = document.getElementById('btnSave');
+        btn.disabled = true;
+        var pkg = document.getElementById('pkgInput').value.trim();
+        if (!validPkg(pkg)) {
+            feedback('包名无效，例如 com.game.example', false);
+            btn.disabled = false;
+            return;
+        }
+        // 单引号包一层，避免 shell 注入；包名本身已校验
+        var cmd = "mkdir -p '" + MOD + "' && printf '%s\\n' '" + pkg + "' > '" + CFG + "' && cat '" + CFG + "'";
+        run(cmd).then(function (r) {
+            var saved = (r.out || '').split('\n')[0].trim();
+            if (saved === pkg) {
                 feedback('已保存，请完全杀掉游戏后冷启动', true);
             } else {
-                feedback(`保存失败: ${r.err || r.out || '未知错误'}`, false);
+                feedback('保存失败: ' + (r.err || r.out || '未知错误'), false);
             }
-            await loadCurrent();
-        } finally {
+            return loadCurrent();
+        }).finally(function () {
             btn.disabled = false;
-        }
+        });
     }
 
-    async function clearPkg() {
-        const btn = document.getElementById('btnClear');
+    function clearPkg() {
+        feedback('正在清除…', true);
+        var btn = document.getElementById('btnClear');
         btn.disabled = true;
-        try {
-            const r = await run(`rm -f "${CFG}"`);
-            feedback(r.ok ? '已清除配置' : `清除失败: ${r.err || '未知错误'}`, r.ok);
-            await loadCurrent();
-        } finally {
+        run("rm -f '" + CFG + "'").then(function (r) {
+            feedback(r.ok || !r.err ? '已清除配置' : ('清除失败: ' + r.err), !r.err || r.ok);
+            return loadCurrent();
+        }).finally(function () {
             btn.disabled = false;
-        }
+        });
     }
 
-    document.getElementById('btnSave').addEventListener('click', savePkg);
-    document.getElementById('btnClear').addEventListener('click', clearPkg);
+    document.getElementById('btnSave').onclick = savePkg;
+    document.getElementById('btnClear').onclick = clearPkg;
 
-    try {
-        await loadCurrent();
-    } catch (e) {
-        document.getElementById('curPkg').textContent = '读取失败';
-        feedback(`WebUI 初始化失败: ${e}`, false);
+    // 先立刻改掉「读取中」，证明脚本已执行
+    document.getElementById('curPkg').textContent = '读取中…';
+    document.getElementById('outPath').textContent = '读取中…';
+
+    if (!getBridge()) {
+        applyPkg('');
+        feedback('未检测到 ksu 桥接。请用 KernelSU Manager 打开模块 WebUI，不要用浏览器打开。', false);
+    } else {
+        loadCurrent();
     }
+})();
 </script>
 </body>
 </html>
