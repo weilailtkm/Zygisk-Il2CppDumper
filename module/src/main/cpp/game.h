@@ -5,6 +5,7 @@
 #ifndef ZYGISK_IL2CPPDUMPER_GAME_H
 #define ZYGISK_IL2CPPDUMPER_GAME_H
 
-#define GamePackageName "com.game.packagename"
+#define MODULE_ID "zygisk_il2cppdumper"
+#define TARGET_PACKAGE_PATH "/data/adb/modules/" MODULE_ID "/target_package"
 
 #endif //ZYGISK_IL2CPPDUMPER_GAME_H

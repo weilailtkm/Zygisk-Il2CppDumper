@@ -1,21 +1,47 @@
 # Zygisk-Il2CppDumper
-Il2CppDumper with Zygisk, dump il2cpp data at runtime, can bypass protection, encryption and obfuscation.
 
-中文说明请戳[这里](README.zh-CN.md)
+Dump Unity IL2CPP metadata at runtime through **Zygisk** (bypasses encrypted/on-disk `global-metadata` issues).
 
-## How to use
-1. Install [Magisk](https://github.com/topjohnwu/Magisk) v24 or later and enable Zygisk
-2. Build module
-   - GitHub Actions
-      1. Fork this repo
-      2. Go to the **Actions** tab in your forked repo
-      3. In the left sidebar, click the **Build** workflow.
-      4. Above the list of workflow runs, select **Run workflow**
-      5. Input the game package name and click **Run workflow**
-      6. Wait for the action to complete and download the artifact
-   - Android Studio
-      1. Download the source code
-      2. Edit `game.h`, modify `GamePackageName` to the game package name
-      3. Use Android Studio to run the gradle task `:module:assembleRelease` to compile, the zip package will be generated in the `out` folder
-3. Install module in Magisk
-4. Start the game, `dump.cs` will be generated in the `/data/data/GamePackageName/files/` directory
+Based on [weilailtkm/Zygisk-Il2CppDumper](https://github.com/weilailtkm/Zygisk-Il2CppDumper) / Perfare.
+
+中文说明：[README.zh-CN.md](README.zh-CN.md)
+
+## Design
+
+- **Inject**: Zygisk only (Magisk Zygisk or KernelSU + ZygiskNext)
+- **Config**: runtime package name (no rebuild required)
+- **Output**: `/data/data/<package>/files/dump.cs`
+- **Not included**: kernel injection / KPM
+
+## Requirements
+
+- Magisk v24+ with Zygisk, **or** KernelSU + [ZygiskNext](https://github.com/Dr-TSNG/ZygiskNext)
+- Target app must use IL2CPP
+
+## Build
+
+```bash
+./gradlew :module:assembleRelease
+```
+
+Zip is under `out/`.
+
+GitHub Actions: run **Build** workflow; set package in WebUI after install.
+
+## Install & configure
+
+1. Flash the module, reboot
+2. Set dump package (KernelSU): Manager → Il2CppDumper → WebUI → pick or type package → Save
+3. Cold-start the game
+4. Pull dump:
+   ```bash
+   adb shell su -c 'cat /data/data/<package>/files/dump.cs' > dump.cs
+   ```
+
+Logs: `adb logcat | grep Il2CppDumper`
+
+## Notes
+
+- Waits up to ~120s for `libil2cpp.so`
+- RVA uses xdl module base
+- Emulators (x86) still use Native Bridge path when needed

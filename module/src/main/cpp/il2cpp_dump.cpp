@@ -3,10 +3,10 @@
 //
 
 #include "il2cpp_dump.h"
-#include <dlfcn.h>
 #include <cstdlib>
 #include <cstring>
 #include <cinttypes>
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <sstream>
@@ -24,6 +24,35 @@
 #undef DO_API
 
 static uint64_t il2cpp_base = 0;
+
+static std::string get_type_name(const Il2CppType *type) {
+    if (!type) {
+        return "void";
+    }
+    if (il2cpp_type_get_name) {
+        char *raw = il2cpp_type_get_name(type);
+        if (raw) {
+            std::string name(raw);
+            if (il2cpp_free) {
+                il2cpp_free(raw);
+            }
+            if (!name.empty() && name.back() == '&') {
+                name.pop_back();
+            }
+            return name;
+        }
+    }
+    if (il2cpp_class_from_type && il2cpp_class_get_name) {
+        auto klass = il2cpp_class_from_type(type);
+        if (klass) {
+            auto name = il2cpp_class_get_name(klass);
+            if (name) {
+                return name;
+            }
+        }
+    }
+    return "void";
+}
 
 void init_il2cpp_api(void *handle) {
 #define DO_API(r, n, p) {                      \
@@ -118,8 +147,7 @@ std::string dump_method(Il2CppClass *klass) {
         if (_il2cpp_type_is_byref(return_type)) {
             outPut << "ref ";
         }
-        auto return_class = il2cpp_class_from_type(return_type);
-        outPut << il2cpp_class_get_name(return_class) << " " << il2cpp_method_get_name(method)
+        outPut << get_type_name(return_type) << " " << il2cpp_method_get_name(method)
                << "(";
         auto param_count = il2cpp_method_get_param_count(method);
         for (int i = 0; i < param_count; ++i) {
@@ -141,8 +169,7 @@ std::string dump_method(Il2CppClass *klass) {
                     outPut << "[Out] ";
                 }
             }
-            auto parameter_class = il2cpp_class_from_type(param);
-            outPut << il2cpp_class_get_name(parameter_class) << " "
+            outPut << get_type_name(param) << " "
                    << il2cpp_method_get_param_name(method, i);
             outPut << ", ";
         }
@@ -177,7 +204,8 @@ std::string dump_property(Il2CppClass *klass) {
             prop_class = il2cpp_class_from_type(param);
         }
         if (prop_class) {
-            outPut << il2cpp_class_get_name(prop_class) << " " << prop_name << " { ";
+            auto prop_type = get ? il2cpp_method_get_return_type(get) : il2cpp_method_get_param(set, 0);
+            outPut << get_type_name(prop_type) << " " << prop_name << " { ";
             if (get) {
                 outPut << "get; ";
             }
@@ -233,8 +261,7 @@ std::string dump_field(Il2CppClass *klass) {
             }
         }
         auto field_type = il2cpp_field_get_type(field);
-        auto field_class = il2cpp_class_from_type(field_type);
-        outPut << il2cpp_class_get_name(field_class) << " " << il2cpp_field_get_name(field);
+        outPut << get_type_name(field_type) << " " << il2cpp_field_get_name(field);
         //TODO 获取构造函数初始化后的字段值
         if (attrs & FIELD_ATTRIBUTE_LITERAL && is_enum) {
             uint64_t val = 0;
@@ -322,32 +349,58 @@ std::string dump_type(const Il2CppType *type) {
     return outPut.str();
 }
 
-void il2cpp_api_init(void *handle) {
+bool il2cpp_api_init(void *handle) {
     LOGI("il2cpp_handle: %p", handle);
     init_il2cpp_api(handle);
-    if (il2cpp_domain_get_assemblies) {
-        Dl_info dlInfo;
-        if (dladdr((void *) il2cpp_domain_get_assemblies, &dlInfo)) {
-            il2cpp_base = reinterpret_cast<uint64_t>(dlInfo.dli_fbase);
+    il2cpp_base = 0;
+    xdl_info_t info{};
+    if (xdl_info(handle, XDL_DI_DLINFO, &info) == 0 && info.dli_fbase) {
+        il2cpp_base = reinterpret_cast<uint64_t>(info.dli_fbase);
+    } else if (il2cpp_domain_get_assemblies) {
+        xdl_info_t addr_info{};
+        void *cache = nullptr;
+        if (xdl_addr(reinterpret_cast<void *>(il2cpp_domain_get_assemblies), &addr_info, &cache)) {
+            il2cpp_base = reinterpret_cast<uint64_t>(addr_info.dli_fbase);
         }
-        LOGI("il2cpp_base: %" PRIx64"", il2cpp_base);
-    } else {
-        LOGE("Failed to initialize il2cpp api.");
-        return;
+        xdl_addr_clean(&cache);
     }
-    while (!il2cpp_is_vm_thread(nullptr)) {
-        LOGI("Waiting for il2cpp_init...");
-        sleep(1);
+    LOGI("il2cpp_base: %" PRIx64"", il2cpp_base);
+    if (!il2cpp_base || !il2cpp_domain_get || !il2cpp_thread_attach || !il2cpp_domain_get_assemblies) {
+        LOGE("Failed to initialize il2cpp api.");
+        return false;
+    }
+    if (il2cpp_is_vm_thread) {
+        for (int i = 0; i < 60 && !il2cpp_is_vm_thread(nullptr); ++i) {
+            LOGI("Waiting for il2cpp_init...");
+            sleep(1);
+        }
+        if (!il2cpp_is_vm_thread(nullptr)) {
+            LOGE("il2cpp vm thread not ready");
+            return false;
+        }
     }
     auto domain = il2cpp_domain_get();
+    if (!domain) {
+        LOGE("il2cpp_domain_get returned null");
+        return false;
+    }
     il2cpp_thread_attach(domain);
+    return true;
 }
 
 void il2cpp_dump(const char *outDir) {
     LOGI("dumping...");
-    size_t size;
+    size_t size = 0;
     auto domain = il2cpp_domain_get();
+    if (!domain || !il2cpp_domain_get_assemblies) {
+        LOGE("domain is not ready");
+        return;
+    }
     auto assemblies = il2cpp_domain_get_assemblies(domain, &size);
+    if (!assemblies) {
+        LOGE("no assemblies");
+        return;
+    }
     std::stringstream imageOutput;
     for (int i = 0; i < size; ++i) {
         auto image = il2cpp_assembly_get_image(assemblies[i]);
@@ -419,11 +472,15 @@ void il2cpp_dump(const char *outDir) {
     LOGI("write dump file");
     auto outPath = std::string(outDir).append("/files/dump.cs");
     std::ofstream outStream(outPath);
+    if (!outStream) {
+        LOGE("failed to write %s", outPath.c_str());
+        return;
+    }
     outStream << imageOutput.str();
     auto count = outPuts.size();
     for (int i = 0; i < count; ++i) {
         outStream << outPuts[i];
     }
     outStream.close();
-    LOGI("dump done!");
+    LOGI("dump done: %s (%zu types)", outPath.c_str(), count);
 }

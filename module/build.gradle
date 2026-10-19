@@ -75,6 +75,30 @@ afterEvaluate {
                     Files.move(srcPath, dstPath)
                 }
                 new File("$magiskDir/lib").deleteDir()
+
+                // KernelSU WebUI
+                def webrootSource = file("$templatePath/webroot")
+                if (webrootSource.exists()) {
+                    copy {
+                        from webrootSource
+                        into "$magiskDir/webroot"
+                    }
+                }
+
+                // Empty package config placeholder
+                def cfg = file("$magiskDir/target_package")
+                if (!cfg.exists()) {
+                    cfg.text = ""
+                }
+
+                [
+                        "$magiskDir/customize.sh",
+                ].each { path ->
+                    def f = file(path)
+                    if (f.exists()) {
+                        f.setExecutable(true, false)
+                    }
+                }
             }
         }
 

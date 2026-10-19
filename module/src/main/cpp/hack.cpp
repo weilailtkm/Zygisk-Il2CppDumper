@@ -8,6 +8,7 @@
 #include "xdl.h"
 #include <cstring>
 #include <cstdio>
+#include <string>
 #include <unistd.h>
 #include <sys/system_properties.h>
 #include <dlfcn.h>
@@ -17,18 +18,47 @@
 #include <linux/unistd.h>
 #include <array>
 
+static int find_il2cpp_module(struct dl_phdr_info *info, size_t, void *data) {
+    auto *path = static_cast<std::string *>(data);
+    if (info->dlpi_name && strstr(info->dlpi_name, "libil2cpp")) {
+        *path = info->dlpi_name;
+        return 1;
+    }
+    return 0;
+}
+
+static void *open_il2cpp() {
+    static const char *names[] = {"libil2cpp.so", "libil2cpp.so.bytes"};
+    for (const char *name : names) {
+        if (void *handle = xdl_open(name, XDL_DEFAULT)) {
+            return handle;
+        }
+    }
+    std::string path;
+    xdl_iterate_phdr(find_il2cpp_module, &path, XDL_FULL_PATHNAME);
+    if (!path.empty()) {
+        LOGI("found il2cpp module: %s", path.c_str());
+        return xdl_open(path.c_str(), XDL_DEFAULT);
+    }
+    return nullptr;
+}
+
 void hack_start(const char *game_data_dir) {
+    constexpr int kTries = 120;
     bool load = false;
-    for (int i = 0; i < 10; i++) {
-        void *handle = xdl_open("libil2cpp.so", 0);
+    for (int i = 0; i < kTries; i++) {
+        void *handle = open_il2cpp();
         if (handle) {
             load = true;
-            il2cpp_api_init(handle);
-            il2cpp_dump(game_data_dir);
+            if (il2cpp_api_init(handle)) {
+                il2cpp_dump(game_data_dir);
+            }
             break;
-        } else {
-            sleep(1);
         }
+        if (i == 0 || (i + 1) % 15 == 0) {
+            LOGI("waiting for libil2cpp.so (%d/%d)", i + 1, kTries);
+        }
+        sleep(1);
     }
     if (!load) {
         LOGI("libil2cpp.so not found in thread %d", gettid());
@@ -112,7 +142,6 @@ struct NativeBridgeCallbacks {
 };
 
 bool NativeBridgeLoad(const char *game_data_dir, int api_level, void *data, size_t length) {
-    //TODO 等待houdini初始化
     sleep(5);
 
     auto libart = dlopen("libart.so", RTLD_NOW);

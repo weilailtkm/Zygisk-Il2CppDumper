@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Il2CppDumper</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #0f172a;
+            min-height: 100vh;
+            padding: 20px;
+            color: #e2e8f0;
+        }
+        .container {
+            max-width: 640px;
+            margin: 0 auto;
+            background: #1e293b;
+            border-radius: 14px;
+            padding: 24px;
+            border: 1px solid #334155;
+        }
+        h1 { font-size: 22px; margin-bottom: 6px; color: #38bdf8; }
+        .sub { color: #94a3b8; font-size: 13px; margin-bottom: 20px; }
+        .card {
+            background: #0f172a;
+            border-radius: 10px;
+            padding: 14px;
+            margin-bottom: 16px;
+            border: 1px solid #334155;
+        }
+        .row {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 8px 0;
+            border-bottom: 1px solid #1e293b;
+            font-size: 14px;
+        }
+        .row:last-child { border-bottom: none; }
+        .label { color: #94a3b8; }
+        .value { font-weight: 600; text-align: right; word-break: break-all; }
+        label { display: block; margin-bottom: 8px; font-weight: 600; }
+        input[type="text"] {
+            width: 100%;
+            padding: 12px;
+            border-radius: 8px;
+            border: 1px solid #475569;
+            background: #0f172a;
+            color: #e2e8f0;
+            font-size: 15px;
+            margin-bottom: 8px;
+        }
+        .hint { font-size: 12px; color: #64748b; margin-bottom: 14px; }
+        .btn {
+            width: 100%;
+            padding: 12px;
+            border: none;
+            border-radius: 8px;
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+            margin-bottom: 8px;
+        }
+        .btn-primary { background: #0284c7; color: white; }
+        .btn-secondary { background: #334155; color: #e2e8f0; }
+        .btn:disabled { opacity: 0.5; }
+        .toast {
+            position: fixed;
+            top: 16px;
+            right: 16px;
+            padding: 12px 16px;
+            border-radius: 8px;
+            color: white;
+            font-weight: 600;
+            transform: translateX(120%);
+            transition: transform 0.25s;
+            z-index: 10;
+        }
+        .toast.show { transform: translateX(0); }
+        .toast.ok { background: #16a34a; }
+        .toast.err { background: #dc2626; }
+        select {
+            width: 100%;
+            padding: 12px;
+            border-radius: 8px;
+            border: 1px solid #475569;
+            background: #0f172a;
+            color: #e2e8f0;
+            font-size: 14px;
+            margin-bottom: 8px;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>Il2CppDumper</h1>
+    <p class="sub">Zygisk 运行时 dump · 选择目标包名后启动游戏</p>
+
+    <div class="card">
+        <div class="row"><span class="label">当前包名</span><span class="value" id="curPkg">读取中…</span></div>
+        <div class="row"><span class="label">输出路径</span><span class="value" id="outPath">—</span></div>
+    </div>
+
+    <label for="pkgSelect">已安装应用（可选）</label>
+    <select id="pkgSelect">
+        <option value="">— 手动输入或从列表选择 —</option>
+    </select>
+
+    <label for="pkgInput">目标包名</label>
+    <input id="pkgInput" type="text" placeholder="com.game.example" autocomplete="off">
+    <p class="hint">写入 /data/adb/modules/zygisk_il2cppdumper/target_package，无需重编 so。</p>
+
+    <button class="btn btn-primary" id="btnSave" onclick="savePkg()">保存并用于 dump</button>
+    <button class="btn btn-secondary" id="btnRefresh" onclick="refreshApps()">刷新应用列表</button>
+    <button class="btn btn-secondary" id="btnClear" onclick="clearPkg()">清除配置</button>
+</div>
+<div class="toast" id="toast"></div>
+
+<script type="module">
+    import { exec } from 'kernelsu';
+
+    const MOD = '/data/adb/modules/zygisk_il2cppdumper';
+    const CFG = `${MOD}/target_package`;
+
+    function run(cmd) {
+        try {
+            const r = exec(cmd);
+            return { ok: r.errno === 0, out: (r.stdout || '').trim(), err: (r.stderr || '').trim() };
+        } catch (e) {
+            return { ok: false, out: '', err: String(e) };
+        }
+    }
+
+    function toast(msg, ok) {
+        const el = document.getElementById('toast');
+        el.textContent = msg;
+        el.className = `toast show ${ok ? 'ok' : 'err'}`;
+        setTimeout(() => el.classList.remove('show'), 2500);
+    }
+
+    function validPkg(p) {
+        return /^[A-Za-z0-9_.]+$/.test(p) && p.includes('.');
+    }
+
+    async function loadCurrent() {
+        const r = run(`cat "${CFG}" 2>/dev/null`);
+        const pkg = r.out.split('\n')[0].trim();
+        document.getElementById('curPkg').textContent = pkg || '未设置（将用编译默认包名）';
+        document.getElementById('pkgInput').value = pkg || '';
+        document.getElementById('outPath').textContent = pkg
+            ? `/data/data/${pkg}/files/dump.cs`
+            : '保存包名后显示';
+    }
+
+    async function refreshApps() {
+        const btn = document.getElementById('btnRefresh');
+        btn.disabled = true;
+        // Prefer third-party packages; fall back to all.
+        let r = run(`pm list packages -3 2>/dev/null`);
+        if (!r.out) r = run(`pm list packages 2>/dev/null`);
+        const sel = document.getElementById('pkgSelect');
+        const keep = sel.options[0];
+        sel.innerHTML = '';
+        sel.appendChild(keep);
+        const lines = r.out.split('\n').map(s => s.replace(/^package:/, '').trim()).filter(Boolean);
+        lines.sort();
+        for (const p of lines) {
+            const opt = document.createElement('option');
+            opt.value = p;
+            opt.textContent = p;
+            sel.appendChild(opt);
+        }
+        btn.disabled = false;
+        toast(`已加载 ${lines.length} 个包名`, true);
+    }
+
+    window.savePkg = async function () {
+        const pkg = document.getElementById('pkgInput').value.trim();
+        if (!validPkg(pkg)) {
+            toast('包名无效', false);
+            return;
+        }
+        const r = run(`mkdir -p "${MOD}" && printf '%s\\n' "${pkg}" > "${CFG}"`);
+        toast(r.ok ? '已保存，请冷启动目标游戏' : '保存失败', r.ok);
+        await loadCurrent();
+    };
+
+    window.clearPkg = async function () {
+        run(`rm -f "${CFG}"`);
+        toast('已清除', true);
+        await loadCurrent();
+    };
+
+    window.refreshApps = refreshApps;
+
+    document.getElementById('pkgSelect').addEventListener('change', (e) => {
+        if (e.target.value) {
+            document.getElementById('pkgInput').value = e.target.value;
+        }
+    });
+
+    loadCurrent();
+    refreshApps();
+</script>
+</body>
+</html>

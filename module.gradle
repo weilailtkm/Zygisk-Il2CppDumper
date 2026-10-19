@@ -3,7 +3,7 @@ ext {
     magiskModuleId = "zygisk_il2cppdumper"
     moduleName = "Il2CppDumper"
     moduleAuthor = "Perfare"
-    moduleDescription = "Il2CppDumper Zygisk version."
-    moduleVersion = "v1.2.0"
-    moduleVersionCode = 1
+    moduleDescription = "Runtime IL2CPP dump via Zygisk. Set package in KernelSU WebUI."
+    moduleVersion = "v2.0.0"
+    moduleVersionCode = 200
 }
