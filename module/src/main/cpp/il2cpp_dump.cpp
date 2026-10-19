@@ -12,10 +12,24 @@
 #include <sstream>
 #include <fstream>
 #include <unistd.h>
+#include <csetjmp>
+#include <csignal>
 #include "xdl.h"
 #include "log.h"
 #include "il2cpp-tabledefs.h"
 #include "il2cpp-class.h"
+
+// ponytail: longjmp skips toxic classes; leaks on crash path OK vs whole-process die
+static sigjmp_buf g_dump_jmp;
+static volatile sig_atomic_t g_dump_guard = 0;
+
+static void dump_crash_handler(int) {
+    if (!g_dump_guard) {
+        _exit(1);
+    }
+    g_dump_guard = 0;
+    siglongjmp(g_dump_jmp, 1);
+}
 
 #define DO_API(r, n, p) r (*n) p
 
@@ -114,11 +128,13 @@ std::string get_method_modifier(uint32_t flags) {
 }
 
 bool _il2cpp_type_is_byref(const Il2CppType *type) {
-    auto byref = type->byref;
-    if (il2cpp_type_is_byref) {
-        byref = il2cpp_type_is_byref(type);
+    if (!type) {
+        return false;
     }
-    return byref;
+    if (il2cpp_type_is_byref) {
+        return il2cpp_type_is_byref(type);
+    }
+    return type->byref;
 }
 
 std::string dump_method(Il2CppClass *klass) {
@@ -127,18 +143,8 @@ std::string dump_method(Il2CppClass *klass) {
     void *iter = nullptr;
     while (auto method = il2cpp_class_get_methods(klass, &iter)) {
         //TODO attribute
-        if (method->methodPointer) {
-            outPut << "\t// RVA: 0x";
-            outPut << std::hex << (uint64_t) method->methodPointer - il2cpp_base;
-            outPut << " VA: 0x";
-            outPut << std::hex << (uint64_t) method->methodPointer;
-        } else {
-            outPut << "\t// RVA: 0x VA: 0x0";
-        }
-        /*if (method->slot != 65535) {
-            outPut << " Slot: " << std::dec << method->slot;
-        }*/
-        outPut << "\n\t";
+        // 只用 API；MethodInfo 布局随 Unity 变，勿直接读 methodPointer
+        outPut << "\t// RVA: - VA: -\n\t";
         uint32_t iflags = 0;
         auto flags = il2cpp_method_get_flags(method, &iflags);
         outPut << get_method_modifier(flags);
@@ -147,11 +153,16 @@ std::string dump_method(Il2CppClass *klass) {
         if (_il2cpp_type_is_byref(return_type)) {
             outPut << "ref ";
         }
-        outPut << get_type_name(return_type) << " " << il2cpp_method_get_name(method)
+        auto method_name = il2cpp_method_get_name(method);
+        outPut << get_type_name(return_type) << " " << (method_name ? method_name : "?")
                << "(";
         auto param_count = il2cpp_method_get_param_count(method);
         for (int i = 0; i < param_count; ++i) {
             auto param = il2cpp_method_get_param(method, i);
+            if (!param) {
+                outPut << "?, ";
+                continue;
+            }
             auto attrs = param->attrs;
             if (_il2cpp_type_is_byref(param)) {
                 if (attrs & PARAM_ATTRIBUTE_OUT && !(attrs & PARAM_ATTRIBUTE_IN)) {
@@ -169,8 +180,8 @@ std::string dump_method(Il2CppClass *klass) {
                     outPut << "[Out] ";
                 }
             }
-            outPut << get_type_name(param) << " "
-                   << il2cpp_method_get_param_name(method, i);
+            auto pname = il2cpp_method_get_param_name(method, i);
+            outPut << get_type_name(param) << " " << (pname ? pname : "arg" + std::to_string(i));
             outPut << ", ";
         }
         if (param_count > 0) {
@@ -225,7 +236,6 @@ std::string dump_property(Il2CppClass *klass) {
 std::string dump_field(Il2CppClass *klass) {
     std::stringstream outPut;
     outPut << "\n\t// Fields\n";
-    auto is_enum = il2cpp_class_is_enum(klass);
     void *iter = nullptr;
     while (auto field = il2cpp_class_get_fields(klass, &iter)) {
         //TODO attribute
@@ -261,13 +271,9 @@ std::string dump_field(Il2CppClass *klass) {
             }
         }
         auto field_type = il2cpp_field_get_type(field);
-        outPut << get_type_name(field_type) << " " << il2cpp_field_get_name(field);
-        //TODO 获取构造函数初始化后的字段值
-        if (attrs & FIELD_ATTRIBUTE_LITERAL && is_enum) {
-            uint64_t val = 0;
-            il2cpp_field_static_get_value(field, &val);
-            outPut << " = " << std::dec << val;
-        }
+        auto field_name = il2cpp_field_get_name(field);
+        outPut << get_type_name(field_type) << " " << (field_name ? field_name : "?");
+        // 跳过 static_get_value：未初始化/加固游戏上易 SIGSEGV
         outPut << "; // 0x" << std::hex << il2cpp_field_get_offset(field) << "\n";
     }
     return outPut.str();
@@ -275,8 +281,15 @@ std::string dump_field(Il2CppClass *klass) {
 
 std::string dump_type(const Il2CppType *type) {
     std::stringstream outPut;
+    if (!type) {
+        return outPut.str();
+    }
     auto *klass = il2cpp_class_from_type(type);
-    outPut << "\n// Namespace: " << il2cpp_class_get_namespace(klass) << "\n";
+    if (!klass) {
+        return outPut.str();
+    }
+    auto ns = il2cpp_class_get_namespace(klass);
+    outPut << "\n// Namespace: " << (ns ? ns : "") << "\n";
     auto flags = il2cpp_class_get_flags(klass);
     if (flags & TYPE_ATTRIBUTE_SERIALIZABLE) {
         outPut << "[Serializable]\n";
@@ -385,6 +398,8 @@ bool il2cpp_api_init(void *handle) {
         return false;
     }
     il2cpp_thread_attach(domain);
+    // 等元数据/静态构造稍稳再扫，减少开局秒崩
+    sleep(3);
     return true;
 }
 
@@ -401,86 +416,68 @@ void il2cpp_dump(const char *outDir) {
         LOGE("no assemblies");
         return;
     }
-    std::stringstream imageOutput;
-    for (int i = 0; i < size; ++i) {
-        auto image = il2cpp_assembly_get_image(assemblies[i]);
-        imageOutput << "// Image " << i << ": " << il2cpp_image_get_name(image) << "\n";
-    }
-    std::vector<std::string> outPuts;
-    if (il2cpp_image_get_class) {
-        LOGI("Version greater than 2018.3");
-        //使用il2cpp_image_get_class
-        for (int i = 0; i < size; ++i) {
-            auto image = il2cpp_assembly_get_image(assemblies[i]);
-            std::stringstream imageStr;
-            imageStr << "\n// Dll : " << il2cpp_image_get_name(image);
-            auto classCount = il2cpp_image_get_class_count(image);
-            for (int j = 0; j < classCount; ++j) {
-                auto klass = il2cpp_image_get_class(image, j);
-                auto type = il2cpp_class_get_type(const_cast<Il2CppClass *>(klass));
-                //LOGD("type name : %s", il2cpp_type_get_name(type));
-                auto outPut = imageStr.str() + dump_type(type);
-                outPuts.push_back(outPut);
-            }
-        }
-    } else {
-        LOGI("Version less than 2018.3");
-        //使用反射
-        auto corlib = il2cpp_get_corlib();
-        auto assemblyClass = il2cpp_class_from_name(corlib, "System.Reflection", "Assembly");
-        auto assemblyLoad = il2cpp_class_get_method_from_name(assemblyClass, "Load", 1);
-        auto assemblyGetTypes = il2cpp_class_get_method_from_name(assemblyClass, "GetTypes", 0);
-        if (assemblyLoad && assemblyLoad->methodPointer) {
-            LOGI("Assembly::Load: %p", assemblyLoad->methodPointer);
-        } else {
-            LOGI("miss Assembly::Load");
-            return;
-        }
-        if (assemblyGetTypes && assemblyGetTypes->methodPointer) {
-            LOGI("Assembly::GetTypes: %p", assemblyGetTypes->methodPointer);
-        } else {
-            LOGI("miss Assembly::GetTypes");
-            return;
-        }
-        typedef void *(*Assembly_Load_ftn)(void *, Il2CppString *, void *);
-        typedef Il2CppArray *(*Assembly_GetTypes_ftn)(void *, void *);
-        for (int i = 0; i < size; ++i) {
-            auto image = il2cpp_assembly_get_image(assemblies[i]);
-            std::stringstream imageStr;
-            auto image_name = il2cpp_image_get_name(image);
-            imageStr << "\n// Dll : " << image_name;
-            //LOGD("image name : %s", image->name);
-            auto imageName = std::string(image_name);
-            auto pos = imageName.rfind('.');
-            auto imageNameNoExt = imageName.substr(0, pos);
-            auto assemblyFileName = il2cpp_string_new(imageNameNoExt.data());
-            auto reflectionAssembly = ((Assembly_Load_ftn) assemblyLoad->methodPointer)(nullptr,
-                                                                                        assemblyFileName,
-                                                                                        nullptr);
-            auto reflectionTypes = ((Assembly_GetTypes_ftn) assemblyGetTypes->methodPointer)(
-                    reflectionAssembly, nullptr);
-            auto items = reflectionTypes->vector;
-            for (int j = 0; j < reflectionTypes->max_length; ++j) {
-                auto klass = il2cpp_class_from_system_type((Il2CppReflectionType *) items[j]);
-                auto type = il2cpp_class_get_type(klass);
-                //LOGD("type name : %s", il2cpp_type_get_name(type));
-                auto outPut = imageStr.str() + dump_type(type);
-                outPuts.push_back(outPut);
-            }
-        }
-    }
-    LOGI("write dump file");
+
     auto outPath = std::string(outDir).append("/files/dump.cs");
     std::ofstream outStream(outPath);
     if (!outStream) {
         LOGE("failed to write %s", outPath.c_str());
         return;
     }
-    outStream << imageOutput.str();
-    auto count = outPuts.size();
-    for (int i = 0; i < count; ++i) {
-        outStream << outPuts[i];
+
+    struct sigaction sa{}, old_sa{};
+    sa.sa_handler = dump_crash_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGSEGV, &sa, &old_sa);
+    sigaction(SIGBUS, &sa, nullptr);
+
+    size_t count = 0;
+    size_t skipped = 0;
+    for (int i = 0; i < size; ++i) {
+        auto image = il2cpp_assembly_get_image(assemblies[i]);
+        auto image_name = il2cpp_image_get_name(image);
+        outStream << "// Image " << i << ": " << (image_name ? image_name : "?") << "\n";
     }
+    outStream.flush();
+
+    if (il2cpp_image_get_class) {
+        LOGI("Version greater than 2018.3");
+        for (int i = 0; i < size; ++i) {
+            auto image = il2cpp_assembly_get_image(assemblies[i]);
+            auto image_name = il2cpp_image_get_name(image);
+            std::string imageStr = std::string("\n// Dll : ") + (image_name ? image_name : "?");
+            auto classCount = il2cpp_image_get_class_count(image);
+            for (int j = 0; j < classCount; ++j) {
+                if (sigsetjmp(g_dump_jmp, 1) == 0) {
+                    g_dump_guard = 1;
+                    auto klass = il2cpp_image_get_class(image, j);
+                    if (!klass) {
+                        g_dump_guard = 0;
+                        continue;
+                    }
+                    auto type = il2cpp_class_get_type(const_cast<Il2CppClass *>(klass));
+                    if (!type) {
+                        g_dump_guard = 0;
+                        continue;
+                    }
+                    outStream << imageStr << dump_type(type);
+                    outStream.flush();
+                    g_dump_guard = 0;
+                    ++count;
+                } else {
+                    ++skipped;
+                    outStream << "\n// [skipped crashed class image=" << i << " idx=" << j << "]\n";
+                    outStream.flush();
+                    LOGW("skip crashed class image=%d idx=%d", i, j);
+                }
+            }
+        }
+    } else {
+        LOGI("Version less than 2018.3 — need methodPointer; skip reflection path if layout differs");
+        LOGE("il2cpp_image_get_class missing; cannot dump safely");
+    }
+
+    sigaction(SIGSEGV, &old_sa, nullptr);
     outStream.close();
-    LOGI("dump done: %s (%zu types)", outPath.c_str(), count);
+    LOGI("dump done: %s (%zu types, %zu skipped)", outPath.c_str(), count, skipped);
 }

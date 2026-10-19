@@ -37,7 +37,7 @@ zip 在 `out/`。
      su -c 'echo com.你的包名 > /data/adb/modules/zygisk_il2cppdumper/target_package'
      ```
    - **KernelSU WebUI**：Manager → Il2CppDumper → WebUI → 手输包名 → 保存  
-     （页顶应显示黄色 `webui-4`；没有说明还是旧页面）  
+     （页顶应显示黄色 `webui-5`；没有说明还是旧页面）  
 3. **冷启动**游戏  
 4. 取出 dump：
    ```bash

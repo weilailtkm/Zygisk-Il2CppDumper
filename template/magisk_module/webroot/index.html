@@ -96,28 +96,28 @@
 <body>
 <div class="container">
     <h1>Il2CppDumper</h1>
-    <div class="ver" id="ver">webui-4 · 若看不到这行黄字=还在用旧页面</div>
+    <div class="ver" id="ver">webui-5 · 对齐 zygisk-il2cpp-mcp 的 ksu.exec</div>
     <p class="sub">输入包名 → 保存 → 冷启动游戏</p>
 
     <div class="card">
         <div class="row"><span class="label">当前包名</span><span class="value" id="curPkg">-</span></div>
         <div class="row"><span class="label">输出路径</span><span class="value" id="outPath">-</span></div>
-        <div class="row"><span class="label">桥接</span><span class="value" id="bridge">检测中</span></div>
+        <div class="row"><span class="label">ksu</span><span class="value" id="bridge">-</span></div>
     </div>
 
     <label for="pkgInput">目标包名</label>
     <input id="pkgInput" type="text" placeholder="com.game.example" autocomplete="off" value="">
-    <p class="hint">配置文件：/data/adb/modules/zygisk_il2cppdumper/target_package</p>
+    <p class="hint">配置：/data/adb/modules/zygisk_il2cppdumper/target_package</p>
     <p class="cmd" id="cmdHint">su -c 'echo 包名 > /data/adb/modules/zygisk_il2cppdumper/target_package'</p>
 
     <button class="btn btn-primary" type="button" id="btnSave">保存并用于 dump</button>
     <button class="btn btn-secondary" type="button" id="btnClear">清除配置</button>
     <button class="btn btn-secondary" type="button" id="btnReload">重新读取</button>
-    <div id="msg">页面脚本已加载，可点击按钮</div>
+    <div id="msg">加载中…</div>
 </div>
 
 <script>
-// 故意不用 type=module，保证 Magisk/KSU WebView 都会执行
+// 与 zygisk-il2cpp-mcp WebUI 相同：全局 ksu.exec(cmd, JSON.stringify(opts), callbackName)
 var MOD = "/data/adb/modules/zygisk_il2cppdumper";
 var CFG = MOD + "/target_package";
 var _cb = 0;
@@ -125,133 +125,125 @@ var _cb = 0;
 function $(id) { return document.getElementById(id); }
 
 function setMsg(text, cls) {
-    var el = $("msg");
-    el.textContent = text;
-    el.className = cls || "";
+    $("msg").textContent = text;
+    $("msg").className = cls || "";
 }
 
-function findBridge() {
-    var keys = ["ksu", "KSU", "ksuNext", "SukiSU", "mmrl", "WebUI"];
-    for (var i = 0; i < keys.length; i++) {
-        var o = window[keys[i]];
-        if (o && typeof o.exec === "function") return { name: keys[i], obj: o };
-    }
-    // 部分 WebUI-X
-    if (window.webkit && window.webkit.messageHandlers) {
-        return { name: "webkit", obj: null };
-    }
-    return null;
+function toast(t) {
+    try { if (typeof ksu !== "undefined" && ksu.toast) ksu.toast(String(t)); } catch (e) {}
+}
+
+function hasKsu() {
+    return typeof ksu !== "undefined" && typeof ksu.exec === "function";
+}
+
+// 原样对齐 MCP: Zt(cmd, options) → Promise<{errno,stdout,stderr}>
+function ksuExec(cmd, options) {
+    if (typeof options === "undefined") options = {};
+    return new Promise(function (resolve, reject) {
+        var name = "exec_callback_" + Date.now() + "_" + (_cb++);
+        window[name] = function (errno, stdout, stderr) {
+            resolve({ errno: errno, stdout: stdout, stderr: stderr });
+            try { delete window[name]; } catch (e) { window[name] = undefined; }
+        };
+        try {
+            ksu.exec(cmd, JSON.stringify(options), name);
+        } catch (e) {
+            try { delete window[name]; } catch (e2) { window[name] = undefined; }
+            reject(e);
+        }
+    });
 }
 
 function applyPkg(pkg) {
     $("curPkg").textContent = pkg ? pkg : "未设置";
     if (pkg) $("pkgInput").value = pkg;
     $("outPath").textContent = pkg ? ("/data/data/" + pkg + "/files/dump.cs") : "保存后显示";
-    var show = pkg || "com.xxx";
-    $("cmdHint").textContent = "su -c 'echo " + show + " > /data/adb/modules/zygisk_il2cppdumper/target_package'";
+    $("cmdHint").textContent = "su -c 'echo " + (pkg || "com.xxx") + " > /data/adb/modules/zygisk_il2cppdumper/target_package'";
 }
 
 function validPkg(p) {
     return !!p && p.indexOf(".") > 0 && /^[A-Za-z0-9_.]+$/.test(p);
 }
 
-function execShell(cmd, callback) {
-    var b = findBridge();
-    if (!b || !b.obj) {
-        callback(1, "", "无 exec 桥接");
-        return;
-    }
-    var name = "__il2cpp_" + (++_cb);
-    var finished = false;
-    function done(code, out, err) {
-        if (finished) return;
-        finished = true;
-        try { delete window[name]; } catch (e) { window[name] = undefined; }
-        callback(code, out || "", err || "");
-    }
-    window[name] = function (errno, stdout, stderr) {
-        done(Number(errno), stdout, stderr);
-    };
-    setTimeout(function () {
-        done(124, "", "超时");
-    }, 8000);
+function noBridgeMsg() {
+    applyPkg("");
+    $("bridge").textContent = "无";
+    setMsg("无 ksu 桥接（Magisk 自带 WebUI 往往没有）。请用 KernelSU/SukiSU WebUI，或终端执行绿色命令。", "err");
+    toast("无 ksu 桥接");
+}
 
-    var ex = b.obj.exec;
-    // 按各 Manager 常见签名依次试
-    try { ex.call(b.obj, cmd, "{}", name); return; } catch (e1) {}
-    try { ex.call(b.obj, cmd, name); return; } catch (e2) {}
+async function loadCurrent() {
+    if (!hasKsu()) { noBridgeMsg(); return; }
+    $("bridge").textContent = "ksu.exec";
+    setMsg("正在读取…");
     try {
-        var out = ex.call(b.obj, cmd);
-        done(0, String(out == null ? "" : out), "");
-        return;
-    } catch (e3) {
-        done(1, "", String(e3));
+        var r = await ksuExec('cat "' + CFG + '" 2>/dev/null || true');
+        var pkg = String(r.stdout || "").replace(/\r/g, "").split("\n")[0].trim();
+        applyPkg(pkg);
+        setMsg(pkg ? ("已读取: " + pkg) : "尚未设置包名", pkg ? "ok" : "");
+    } catch (e) {
+        setMsg("读取失败: " + e, "err");
     }
 }
 
-function loadCurrent() {
-    setMsg("正在读取配置…");
-    execShell('cat "' + CFG + '" 2>/dev/null || true', function (code, out, err) {
-        if (err === "无 exec 桥接") {
-            applyPkg("");
-            $("bridge").textContent = "无（请用下方命令行）";
-            setMsg("当前环境没有 root 桥接，WebUI 无法写文件。请用 Magisk/KSU 终端执行黄色框里的命令。", "err");
-            return;
-        }
-        var pkg = String(out).replace(/\r/g, "").split("\n")[0].trim();
-        applyPkg(pkg);
-        $("bridge").textContent = (findBridge() || {}).name || "未知";
-        setMsg(pkg ? ("已读取: " + pkg) : "尚未设置包名", pkg ? "ok" : "");
-    });
-}
-
-function onSave() {
+async function onSave() {
     var pkg = $("pkgInput").value.replace(/\s+/g, "");
-    setMsg("点击了保存: " + (pkg || "(空)"), "");
+    setMsg("点击保存: " + (pkg || "(空)"));
+    toast("保存…");
     if (!validPkg(pkg)) {
         setMsg("包名无效，示例: com.game.example", "err");
         return;
     }
     applyPkg(pkg);
-    setMsg("正在写入…", "");
-    var cmd = "mkdir -p '" + MOD + "' && echo '" + pkg + "' > '" + CFG + "' && cat '" + CFG + "'";
-    execShell(cmd, function (code, out, err) {
-        var saved = String(out).replace(/\r/g, "").split("\n")[0].trim();
+    if (!hasKsu()) {
+        $("cmdHint").textContent = "su -c 'echo " + pkg + " > /data/adb/modules/zygisk_il2cppdumper/target_package'";
+        noBridgeMsg();
+        return;
+    }
+    setMsg("正在写入…");
+    var cmd = "mkdir -p '" + MOD + "' && printf '%s\\n' '" + pkg + "' > '" + CFG + "' && cat '" + CFG + "'";
+    try {
+        var r = await ksuExec(cmd);
+        var saved = String(r.stdout || "").replace(/\r/g, "").split("\n")[0].trim();
         if (saved === pkg) {
-            setMsg("保存成功，请强行停止游戏后重新打开", "ok");
-            loadCurrent();
+            setMsg("保存成功，请强停游戏后冷启动", "ok");
+            toast("已保存 " + pkg);
             return;
         }
-        // 无桥接时给出可复制命令
-        $("cmdHint").textContent = "su -c 'echo " + pkg + " > /data/adb/modules/zygisk_il2cppdumper/target_package'";
-        setMsg("WebUI 写入失败（" + (err || ("code=" + code)) + "）。请在 root 终端执行上方绿色命令。", "err");
-    });
+        setMsg("写入异常 errno=" + r.errno + " out=" + saved + " err=" + (r.stderr || ""), "err");
+    } catch (e) {
+        setMsg("写入失败: " + e, "err");
+    }
 }
 
-function onClear() {
-    setMsg("点击了清除", "");
-    execShell("rm -f '" + CFG + "'", function (code, out, err) {
-        if (err === "无 exec 桥接") {
-            $("cmdHint").textContent = "su -c 'rm -f /data/adb/modules/zygisk_il2cppdumper/target_package'";
-            setMsg("无桥接：请在终端执行绿色命令清除", "err");
-            return;
-        }
+async function onClear() {
+    setMsg("点击清除");
+    if (!hasKsu()) {
+        $("cmdHint").textContent = "su -c 'rm -f /data/adb/modules/zygisk_il2cppdumper/target_package'";
+        noBridgeMsg();
+        return;
+    }
+    try {
+        await ksuExec("rm -f '" + CFG + "'");
         applyPkg("");
         setMsg("已清除", "ok");
-    });
+        toast("已清除");
+    } catch (e) {
+        setMsg("清除失败: " + e, "err");
+    }
 }
 
-$("btnSave").onclick = onSave;
-$("btnClear").onclick = onClear;
-$("btnReload").onclick = loadCurrent;
+$("btnSave").onclick = function () { onSave(); };
+$("btnClear").onclick = function () { onClear(); };
+$("btnReload").onclick = function () { loadCurrent(); };
 $("pkgInput").oninput = function () {
     var p = $("pkgInput").value.replace(/\s+/g, "");
     if (p) $("cmdHint").textContent = "su -c 'echo " + p + " > /data/adb/modules/zygisk_il2cppdumper/target_package'";
 };
 
-// 一加载就改 UI，证明脚本活着
-$("bridge").textContent = findBridge() ? findBridge().name : "无";
-setMsg("脚本 OK · webui-4 · 桥接=" + $("bridge").textContent, "ok");
+$("bridge").textContent = hasKsu() ? "ksu.exec" : "无";
+setMsg("webui-5 已加载 · ksu=" + (hasKsu() ? "有" : "无"), hasKsu() ? "ok" : "err");
 loadCurrent();
 </script>
 </body>
