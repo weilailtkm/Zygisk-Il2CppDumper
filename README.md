@@ -31,7 +31,13 @@ GitHub Actions: run **Build** workflow; set package in WebUI after install.
 ## Install & configure
 
 1. Flash the module, reboot
-2. Set dump package (KernelSU): Manager → Il2CppDumper → WebUI → pick or type package → Save
+2. Set dump package:
+   - **Shell** (Magisk / no WebUI bridge):
+     ```bash
+     su -c 'echo com.your.game > /data/adb/modules/zygisk_il2cppdumper/target_package'
+     ```
+   - **KernelSU WebUI**: Manager → Il2CppDumper → WebUI → type package → Save  
+     (page must show yellow `webui-4`; otherwise old file is still loaded)
 3. Cold-start the game
 4. Pull dump:
    ```bash

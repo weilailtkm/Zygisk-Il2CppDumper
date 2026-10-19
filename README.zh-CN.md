@@ -31,7 +31,13 @@ zip 在 `out/`。
 ## 安装与选包
 
 1. 刷入模块并重启  
-2. 设置要 dump 的包名（KernelSU）：Manager → Il2CppDumper → WebUI → 列表选包或手输 →「保存并用于 dump」  
+2. 设置要 dump 的包名（二选一）：
+   - **命令行（Magisk / 无 WebUI 桥接时用这个）**
+     ```bash
+     su -c 'echo com.你的包名 > /data/adb/modules/zygisk_il2cppdumper/target_package'
+     ```
+   - **KernelSU WebUI**：Manager → Il2CppDumper → WebUI → 手输包名 → 保存  
+     （页顶应显示黄色 `webui-4`；没有说明还是旧页面）  
 3. **冷启动**游戏  
 4. 取出 dump：
    ```bash
