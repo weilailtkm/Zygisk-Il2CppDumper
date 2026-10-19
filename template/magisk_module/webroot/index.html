@@ -66,55 +66,54 @@
         .btn-primary { background: #0284c7; color: white; }
         .btn-secondary { background: #334155; color: #e2e8f0; }
         .btn:disabled { opacity: 0.5; }
-        .toast {
-            position: fixed;
-            top: 16px;
-            right: 16px;
-            padding: 12px 16px;
-            border-radius: 8px;
-            color: white;
-            font-weight: 600;
-            transform: translateX(120%);
-            transition: transform 0.25s;
-            z-index: 10;
-        }
-        .toast.show { transform: translateX(0); }
-        .toast.ok { background: #16a34a; }
-        .toast.err { background: #dc2626; }
-        select {
-            width: 100%;
+        .msg {
+            margin-top: 12px;
             padding: 12px;
             border-radius: 8px;
-            border: 1px solid #475569;
-            background: #0f172a;
-            color: #e2e8f0;
             font-size: 14px;
-            margin-bottom: 8px;
+            font-weight: 600;
+            display: none;
         }
+        .msg.show { display: block; }
+        .msg.ok { background: #14532d; color: #86efac; border: 1px solid #16a34a; }
+        .msg.err { background: #450a0a; color: #fca5a5; border: 1px solid #dc2626; }
+        .toast {
+            position: fixed;
+            left: 16px;
+            right: 16px;
+            bottom: 24px;
+            padding: 14px 16px;
+            border-radius: 10px;
+            color: white;
+            font-weight: 600;
+            text-align: center;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.2s;
+            z-index: 10;
+        }
+        .toast.show { opacity: 1; }
+        .toast.ok { background: #16a34a; }
+        .toast.err { background: #dc2626; }
     </style>
 </head>
 <body>
 <div class="container">
     <h1>Il2CppDumper</h1>
-    <p class="sub">Zygisk 运行时 dump · 选择目标包名后启动游戏</p>
+    <p class="sub">Zygisk 运行时 dump · 输入包名保存后冷启动游戏</p>
 
     <div class="card">
         <div class="row"><span class="label">当前包名</span><span class="value" id="curPkg">读取中…</span></div>
         <div class="row"><span class="label">输出路径</span><span class="value" id="outPath">—</span></div>
     </div>
 
-    <label for="pkgSelect">已安装应用（可选）</label>
-    <select id="pkgSelect">
-        <option value="">— 手动输入或从列表选择 —</option>
-    </select>
-
     <label for="pkgInput">目标包名</label>
     <input id="pkgInput" type="text" placeholder="com.game.example" autocomplete="off">
-    <p class="hint">写入 /data/adb/modules/zygisk_il2cppdumper/target_package，无需重编 so。</p>
+    <p class="hint">写入 /data/adb/modules/zygisk_il2cppdumper/target_package</p>
 
-    <button class="btn btn-primary" id="btnSave" onclick="savePkg()">保存并用于 dump</button>
-    <button class="btn btn-secondary" id="btnRefresh" onclick="refreshApps()">刷新应用列表</button>
-    <button class="btn btn-secondary" id="btnClear" onclick="clearPkg()">清除配置</button>
+    <button class="btn btn-primary" id="btnSave" type="button">保存并用于 dump</button>
+    <button class="btn btn-secondary" id="btnClear" type="button">清除配置</button>
+    <div class="msg" id="msg"></div>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -124,20 +123,25 @@
     const MOD = '/data/adb/modules/zygisk_il2cppdumper';
     const CFG = `${MOD}/target_package`;
 
-    function run(cmd) {
+    async function run(cmd) {
         try {
-            const r = exec(cmd);
+            const r = await Promise.resolve(exec(cmd));
             return { ok: r.errno === 0, out: (r.stdout || '').trim(), err: (r.stderr || '').trim() };
         } catch (e) {
             return { ok: false, out: '', err: String(e) };
         }
     }
 
-    function toast(msg, ok) {
-        const el = document.getElementById('toast');
-        el.textContent = msg;
-        el.className = `toast show ${ok ? 'ok' : 'err'}`;
-        setTimeout(() => el.classList.remove('show'), 2500);
+    function feedback(text, ok) {
+        const toast = document.getElementById('toast');
+        toast.textContent = text;
+        toast.className = `toast show ${ok ? 'ok' : 'err'}`;
+        clearTimeout(feedback._t);
+        feedback._t = setTimeout(() => toast.classList.remove('show'), 2500);
+
+        const msg = document.getElementById('msg');
+        msg.textContent = text;
+        msg.className = `msg show ${ok ? 'ok' : 'err'}`;
     }
 
     function validPkg(p) {
@@ -145,64 +149,58 @@
     }
 
     async function loadCurrent() {
-        const r = run(`cat "${CFG}" 2>/dev/null`);
-        const pkg = r.out.split('\n')[0].trim();
-        document.getElementById('curPkg').textContent = pkg || '未设置（将用编译默认包名）';
+        const r = await run(`cat "${CFG}" 2>/dev/null || true`);
+        const pkg = (r.out || '').split('\n')[0].trim();
+        document.getElementById('curPkg').textContent = pkg || '未设置';
         document.getElementById('pkgInput').value = pkg || '';
         document.getElementById('outPath').textContent = pkg
             ? `/data/data/${pkg}/files/dump.cs`
             : '保存包名后显示';
     }
 
-    async function refreshApps() {
-        const btn = document.getElementById('btnRefresh');
+    async function savePkg() {
+        const btn = document.getElementById('btnSave');
         btn.disabled = true;
-        // Prefer third-party packages; fall back to all.
-        let r = run(`pm list packages -3 2>/dev/null`);
-        if (!r.out) r = run(`pm list packages 2>/dev/null`);
-        const sel = document.getElementById('pkgSelect');
-        const keep = sel.options[0];
-        sel.innerHTML = '';
-        sel.appendChild(keep);
-        const lines = r.out.split('\n').map(s => s.replace(/^package:/, '').trim()).filter(Boolean);
-        lines.sort();
-        for (const p of lines) {
-            const opt = document.createElement('option');
-            opt.value = p;
-            opt.textContent = p;
-            sel.appendChild(opt);
+        try {
+            const pkg = document.getElementById('pkgInput').value.trim();
+            if (!validPkg(pkg)) {
+                feedback('包名无效，例如 com.game.example', false);
+                return;
+            }
+            const r = await run(`mkdir -p "${MOD}" && printf '%s\\n' "${pkg}" > "${CFG}" && cat "${CFG}"`);
+            const saved = (r.out || '').split('\n')[0].trim();
+            if (r.ok && saved === pkg) {
+                feedback('已保存，请完全杀掉游戏后冷启动', true);
+            } else {
+                feedback(`保存失败: ${r.err || r.out || '未知错误'}`, false);
+            }
+            await loadCurrent();
+        } finally {
+            btn.disabled = false;
         }
-        btn.disabled = false;
-        toast(`已加载 ${lines.length} 个包名`, true);
     }
 
-    window.savePkg = async function () {
-        const pkg = document.getElementById('pkgInput').value.trim();
-        if (!validPkg(pkg)) {
-            toast('包名无效', false);
-            return;
+    async function clearPkg() {
+        const btn = document.getElementById('btnClear');
+        btn.disabled = true;
+        try {
+            const r = await run(`rm -f "${CFG}"`);
+            feedback(r.ok ? '已清除配置' : `清除失败: ${r.err || '未知错误'}`, r.ok);
+            await loadCurrent();
+        } finally {
+            btn.disabled = false;
         }
-        const r = run(`mkdir -p "${MOD}" && printf '%s\\n' "${pkg}" > "${CFG}"`);
-        toast(r.ok ? '已保存，请冷启动目标游戏' : '保存失败', r.ok);
+    }
+
+    document.getElementById('btnSave').addEventListener('click', savePkg);
+    document.getElementById('btnClear').addEventListener('click', clearPkg);
+
+    try {
         await loadCurrent();
-    };
-
-    window.clearPkg = async function () {
-        run(`rm -f "${CFG}"`);
-        toast('已清除', true);
-        await loadCurrent();
-    };
-
-    window.refreshApps = refreshApps;
-
-    document.getElementById('pkgSelect').addEventListener('change', (e) => {
-        if (e.target.value) {
-            document.getElementById('pkgInput').value = e.target.value;
-        }
-    });
-
-    loadCurrent();
-    refreshApps();
+    } catch (e) {
+        document.getElementById('curPkg').textContent = '读取失败';
+        feedback(`WebUI 初始化失败: ${e}`, false);
+    }
 </script>
 </body>
 </html>
