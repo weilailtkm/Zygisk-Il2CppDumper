@@ -18,4 +18,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: zygisk-il2cppdumper
-          path: out/
+          # Magisk 要刷的是模块 zip；传整个 out/ 会多一层包装导致 "not a Magisk module"
+          path: out/zygisk-il2cppdumper-*-release.zip
